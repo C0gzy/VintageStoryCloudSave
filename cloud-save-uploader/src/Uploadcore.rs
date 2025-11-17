@@ -10,9 +10,9 @@ use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 
-pub fn upload_save() -> Result<(), Error> {
+pub fn upload_save(folder: String) -> Result<(), Error> {
     let rt = Runtime::new().map_err(to_io_error)?;
-    rt.block_on(run_upload())
+    rt.block_on(run_upload(&folder))
 }
 
 pub fn manifest_status_message() -> String {
@@ -58,12 +58,12 @@ fn check_if_upload_is_needed(files: &[PathBuf]) -> Result<bool, Error> {
     Ok(false)
 }
 
-async fn run_upload() -> Result<(), Error> {
+async fn run_upload(folder_bucket: &str) -> Result<(), Error> {
     let config = build_b2_client().await?;
     let client = Client::new(&config);
 
     let bucket = env::var("B2_BUCKET").map_err(to_io_error)?;
-    let prefix = env::var("B2_PREFIX").unwrap_or_else(|_| "vintagestory".to_string());
+    let prefix = env::var("B2_PREFIX").unwrap_or_else(|_| folder_bucket.to_string());
 
     let save_root = resolve_save_dir()?;
     let files = gather_files(&save_root)?;
@@ -237,9 +237,151 @@ fn file_key(root: &Path, file: &Path) -> String {
 }
 
 
-pub fn download_save() -> Result<(), Error> {
-    println!("Downloading save...");
+pub fn download_save(folder: String) -> Result<(), Error> {
+    let rt = Runtime::new().map_err(to_io_error)?;
+    rt.block_on(run_download(&folder))
+}
+
+async fn run_download(folder_bucket: &str) -> Result<(), Error> {
+    let config = build_b2_client().await?;
+    let client = Client::new(&config);
+
+    let bucket = env::var("B2_BUCKET").map_err(to_io_error)?;
+    let prefix = env::var("B2_PREFIX").unwrap_or_else(|_| folder_bucket.to_string());
+
+    let save_root = resolve_save_dir()?;
+    
+    // List all objects in the B2 bucket with the prefix
+    let remote_files = list_remote_files(&client, &bucket, &prefix).await?;
+    
+    if remote_files.is_empty() {
+        println!("No files found in cloud storage");
+        return Ok(());
+    }
+    
+    println!("Found {} files in cloud storage", remote_files.len());
+    
+    // Determine which files need to be downloaded
+    let files_to_download = determine_files_to_download(&save_root, &prefix, &remote_files)?;
+    
+    if files_to_download.is_empty() {
+        println!("All files are up to date. No download needed.");
+        return Ok(());
+    }
+    
+    println!("Downloading {} file(s)...", files_to_download.len());
+    
+    // Download each file
+    for (remote_key, remote_size) in files_to_download {
+        let local_path = save_root.join(remote_key.strip_prefix(&format!("{}/", prefix)).unwrap_or(&remote_key));
+        
+        // Create parent directories if needed
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent).map_err(to_io_error)?;
+        }
+        
+        println!("Downloading: {} -> {}", remote_key, local_path.display());
+        
+        let response = client
+            .get_object()
+            .bucket(&bucket)
+            .key(&remote_key)
+            .send()
+            .await
+            .map_err(|err| {
+                Error::new(
+                    ErrorKind::Other,
+                    format!("failed to download {}: {}", remote_key, err),
+                )
+            })?;
+        
+        let mut body = response.body.collect().await.map_err(|err| {
+            Error::new(ErrorKind::Other, format!("failed to read download body: {}", err))
+        })?;
+        
+        fs::write(&local_path, body.to_vec()).map_err(to_io_error)?;
+        
+        println!("Downloaded: {} ({} bytes)", local_path.display(), remote_size);
+    }
+    
+    println!("Download complete!");
     Ok(())
+}
+
+async fn list_remote_files(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+) -> Result<HashMap<String, u64>, Error> {
+    let mut remote_files = HashMap::new();
+    let mut continuation_token: Option<String> = None;
+    
+    loop {
+        let mut request = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(format!("{}/", prefix));
+        
+        if let Some(token) = continuation_token {
+            request = request.continuation_token(token);
+        }
+        
+        let response = request.send().await.map_err(|err| {
+            Error::new(
+                ErrorKind::Other,
+                format!("failed to list objects from bucket: {}", err),
+            )
+        })?;
+        
+        if let Some(contents) = response.contents.as_ref() {
+            for object in contents.iter() {
+                if let (Some(key), Some(size)) = (object.key(), object.size()) {
+                    remote_files.insert(key.to_string(), size as u64);
+                }
+            }
+        }
+        
+        continuation_token = response.next_continuation_token().map(|s| s.to_string());
+        if continuation_token.is_none() {
+            break;
+        }
+    }
+    
+    Ok(remote_files)
+}
+
+fn determine_files_to_download(
+    save_root: &Path,
+    prefix: &str,
+    remote_files: &HashMap<String, u64>,
+) -> Result<HashMap<String, u64>, Error> {
+    let mut files_to_download = HashMap::new();
+    
+    for (remote_key, remote_size) in remote_files {
+        // Remove the prefix to get the relative path
+        let relative_path = remote_key
+            .strip_prefix(&format!("{}/", prefix))
+            .unwrap_or(remote_key);
+        
+        let local_path = save_root.join(relative_path);
+        
+        // Check if file needs downloading
+        let needs_download = if !local_path.exists() {
+            true // File doesn't exist locally
+        } else {
+            // File exists, check if size matches
+            match fs::metadata(&local_path) {
+                Ok(metadata) => metadata.len() != *remote_size,
+                Err(_) => true, // Can't read metadata, download to be safe
+            }
+        };
+        
+        if needs_download {
+            files_to_download.insert(remote_key.clone(), *remote_size);
+        }
+    }
+    
+    Ok(files_to_download)
 }
 
 pub fn delete_save() -> Result<(), Error> {
