@@ -62,7 +62,11 @@ async fn run_upload(folder_bucket: &str) -> Result<(), Error> {
     let config = build_b2_client().await?;
     let client = Client::new(&config);
 
-    let bucket = env::var("B2_BUCKET").map_err(to_io_error)?;
+    // Try compile-time env vars first (from build.rs), then fallback to runtime env vars
+    let bucket = option_env!("B2_BUCKET")
+        .map(|s| s.to_string())
+        .or_else(|| env::var("B2_BUCKET").ok())
+        .ok_or_else(|| Error::new(ErrorKind::Other, "B2_BUCKET not set"))?;
     let prefix = env::var("B2_PREFIX").unwrap_or_else(|_| folder_bucket.to_string());
 
     let save_root = resolve_save_dir()?;
@@ -133,11 +137,26 @@ async fn run_upload(folder_bucket: &str) -> Result<(), Error> {
 }
 
 async fn build_b2_client() -> Result<aws_config::SdkConfig, Error> {
-    let key_id = env::var("B2_KEY_ID").map_err(to_io_error)?;
-    let application_key = env::var("B2_APPLICATION_KEY").map_err(to_io_error)?;
-    let region = env::var("B2_REGION").unwrap_or_else(|_| "us-west-000".to_string());
-    let endpoint = env::var("B2_ENDPOINT")
-        .unwrap_or_else(|_| format!("https://s3.{}.backblazeb2.com", region));
+    // Try compile-time env vars first (from build.rs), then fallback to runtime env vars
+    let key_id = option_env!("B2_KEY_ID")
+        .map(|s| s.to_string())
+        .or_else(|| env::var("B2_KEY_ID").ok())
+        .ok_or_else(|| Error::new(ErrorKind::Other, "B2_KEY_ID not set"))?;
+    
+    let application_key = option_env!("B2_APPLICATION_KEY")
+        .map(|s| s.to_string())
+        .or_else(|| env::var("B2_APPLICATION_KEY").ok())
+        .ok_or_else(|| Error::new(ErrorKind::Other, "B2_APPLICATION_KEY not set"))?;
+    
+    let region = option_env!("B2_REGION")
+        .map(|s| s.to_string())
+        .or_else(|| env::var("B2_REGION").ok())
+        .unwrap_or_else(|| "us-west-000".to_string());
+    
+    let endpoint = option_env!("B2_ENDPOINT")
+        .map(|s| s.to_string())
+        .or_else(|| env::var("B2_ENDPOINT").ok())
+        .unwrap_or_else(|| format!("https://s3.{}.backblazeb2.com", region));
 
     let credentials = Credentials::new(key_id, application_key, None, None, "b2");
     let shared_config = aws_config::defaults(BehaviorVersion::latest())
@@ -246,7 +265,11 @@ async fn run_download(folder_bucket: &str) -> Result<(), Error> {
     let config = build_b2_client().await?;
     let client = Client::new(&config);
 
-    let bucket = env::var("B2_BUCKET").map_err(to_io_error)?;
+    // Try compile-time env vars first (from build.rs), then fallback to runtime env vars
+    let bucket = option_env!("B2_BUCKET")
+        .map(|s| s.to_string())
+        .or_else(|| env::var("B2_BUCKET").ok())
+        .ok_or_else(|| Error::new(ErrorKind::Other, "B2_BUCKET not set"))?;
     let prefix = env::var("B2_PREFIX").unwrap_or_else(|_| folder_bucket.to_string());
 
     let save_root = resolve_save_dir()?;

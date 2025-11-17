@@ -18,14 +18,28 @@ Made in Rust using Egui
 
 ## How to Build
 
-Create you own .env in /cloud-save-uploader an put in these values from aws S3
+### Option 1: Using .env file (Recommended for Development)
+
+Create your own `.env` in `/cloud-save-uploader` and put in these values from Backblaze B2:
 ```
 B2_KEY_ID=
 B2_APPLICATION_KEY=
 B2_BUCKET=
 B2_REGION=
-B2_ENDPOINT
+B2_ENDPOINT=
 ```
+
+Then build:
+```bash
+cd cloud-save-uploader
+cargo build --release
+```
+
+### Option 2: Embedding Secrets in Binary (For Distribution)
+
+See [EMBEDDING_SECRETS.md](EMBEDDING_SECRETS.md) for instructions on embedding environment variables at compile time using GitHub Secrets.
+
+**Note:** Embedding secrets in binaries is not recommended for security reasons. Use `.env` files for development.
 
 ## To-Do
 - [ ] update UI
