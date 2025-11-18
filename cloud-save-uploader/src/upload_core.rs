@@ -2,40 +2,35 @@ use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+use std::time::Instant;
+use crate::manifest_info::UploadManifest;
 use tokio::runtime::Runtime;
 
-pub fn upload_save(folder: String) -> Result<(), Error> {
+use crate::helper_functions::resolve_save_dir;
+use crate::manifest_info::{load_manifest, manifest_file_path, save_manifest};
+
+#[derive(Debug, Clone)]
+pub struct UploadProgress {
+    pub uploaded_bytes: u64,
+    pub total_bytes: u64,
+    pub current_file: String,
+    pub elapsed_secs: f32,
+}
+
+pub fn upload_save(folder: String, progress_tx: Option<Sender<UploadProgress>>) -> Result<(), Error> {
     let rt = Runtime::new().map_err(to_io_error)?;
-    rt.block_on(run_upload(&folder))
+    rt.block_on(run_upload(&folder, progress_tx))
 }
 
-pub fn manifest_status_message() -> String {
-    match resolve_save_dir() {
-        Ok(save_root) => {
-            let manifest_path = manifest_file_path(&save_root);
-            if manifest_path.exists() {
-                match load_manifest(&manifest_path) {
-                    Ok(manifest) => format!(
-                        "Existing manifest found. Tracking {} files.",
-                        manifest.files.len()
-                    ),
-                    Err(err) => format!("Manifest found but unreadable: {err}"),
-                }
-            } else {
-                "No manifest found. Start an upload to create tracking data.".to_string()
-            }
-        }
-        Err(err) => format!("Could not locate save directory: {err}"),
-    }
-}
 
-fn check_if_upload_is_needed(files: &[PathBuf]) -> Result<bool, Error> {
+
+fn check_if_upload_is_needed(files: &[PathBuf], folder_bucket: String) -> Result<bool, Error> {
     if files.is_empty() {
         return Ok(false);
     }
@@ -48,17 +43,34 @@ fn check_if_upload_is_needed(files: &[PathBuf]) -> Result<bool, Error> {
         let metadata = fs::metadata(file).map_err(to_io_error)?;
         let size = metadata.len();
         let key = file_key(&save_root, file);
-
-        match manifest.files.get(&key) {
-            Some(stored_size) if *stored_size == size => continue,
-            _ => return Ok(true),
+        let folder_manifest = manifest.all_file_info.get(&folder_bucket);
+        // Check if file exists in manifest and size matches
+        if folder_manifest.is_some() {
+            match folder_manifest.unwrap().files.get(&key) {
+                Some(file_info) => {
+                    if let Some(stored_size) = file_info.file_size {
+                        if stored_size != size {
+                            return Ok(true); // Size changed, need to upload
+                        }
+                    } else {
+                        // No size stored, assume we need to upload
+                        return Ok(true);
+                    }
+                }
+                None => return Ok(true), // New file, need to upload
+            }
+        } else {
+            return Ok(true); // New folder, need to upload
         }
     }
 
     Ok(false)
 }
 
-async fn run_upload(folder_bucket: &str) -> Result<(), Error> {
+async fn run_upload(
+    folder_bucket: &str,
+    progress_tx: Option<Sender<UploadProgress>>,
+) -> Result<(), Error> {
     let config = build_b2_client().await?;
     let client = Client::new(&config);
 
@@ -79,7 +91,7 @@ async fn run_upload(folder_bucket: &str) -> Result<(), Error> {
         ));
     }
 
-    if !check_if_upload_is_needed(&files)? {
+    if !check_if_upload_is_needed(&files, folder_bucket.to_string())? {
         return Ok(());
     }
 
@@ -92,6 +104,15 @@ async fn run_upload(folder_bucket: &str) -> Result<(), Error> {
     let mut manifest = load_manifest(&manifest_path)?;
     let mut manifest_dirty = false;
 
+    struct PendingUpload {
+        path: PathBuf,
+        s3_key: String,
+        manifest_key: String,
+        size: u64,
+    }
+
+    let mut pending_uploads: Vec<PendingUpload> = Vec::new();
+
     for file in files {
         let relative = file
             .strip_prefix(&save_root)
@@ -102,35 +123,116 @@ async fn run_upload(folder_bucket: &str) -> Result<(), Error> {
         let file_key = file_key(&save_root, &file);
         let metadata = fs::metadata(&file).map_err(to_io_error)?;
         let size = metadata.len();
+        let folder_manifest = manifest.all_file_info.get(folder_bucket);
+        let mut needs_upload = false;
 
-        if let Some(stored_size) = manifest.files.get(&file_key) {
-            if *stored_size == size {
-                continue;
-            }
+        if folder_manifest.is_some()  {
+            // Check if file needs uploading (compare by file size)
+            needs_upload = match folder_manifest.unwrap().files.get(&file_key) {
+                Some(file_info) => {
+                    // File exists in manifest, check if size changed
+                    match file_info.file_size {
+                        Some(stored_size) => stored_size != size,
+                        None => true, // No size stored, assume changed
+                    }
+                }
+                None => true, // New file
+            };
+        } else {
+            needs_upload = true;
         }
 
-        let body = ByteStream::from_path(&file).await.map_err(to_io_error)?;
+        if needs_upload {
+            pending_uploads.push(PendingUpload {
+                path: file.clone(),
+                s3_key: key,
+                manifest_key: file_key,
+                size,
+            });
+        }
+    }
+
+    if pending_uploads.is_empty() {
+        return Ok(());
+    }
+
+    let total_bytes: u64 = pending_uploads.iter().map(|entry| entry.size).sum();
+    let mut uploaded_bytes: u64 = 0;
+    let start_time = Instant::now();
+
+    if let Some(tx) = &progress_tx {
+        let _ = tx.send(UploadProgress {
+            uploaded_bytes,
+            total_bytes,
+            current_file: String::new(),
+            elapsed_secs: 0.0,
+        });
+    }
+
+    for entry in pending_uploads {
+        let body = ByteStream::from_path(&entry.path).await.map_err(to_io_error)?;
 
         client
             .put_object()
             .bucket(&bucket)
-            .key(&key)
+            .key(&entry.s3_key)
             .body(body)
             .send()
             .await
             .map_err(|err| {
                 Error::new(
                     ErrorKind::Other,
-                    format!("failed to upload {} to {}: {}", file.display(), key, err),
+                    format!("failed to upload {} to {}: {}", entry.path.display(), entry.s3_key, err),
                 )
             })?;
 
-        manifest.files.insert(file_key, size);
+        let world_name = if entry.manifest_key.ends_with(".vcdbs") {
+            entry
+                .manifest_key
+                .strip_suffix(".vcdbs")
+                .unwrap_or(&entry.manifest_key)
+                .to_string()
+        } else {
+            entry.manifest_key.clone()
+        };
+
+        let mut playtime = 0u64;
+        if let Ok(game_data) = crate::manifest_info::get_game_data(&entry.path) {
+            if let Some(duration_str) = game_data.get("play_duration_seconds") {
+                if let Ok(duration) = duration_str.parse::<u64>() {
+                    playtime = duration;
+                }
+            }
+        }
+
+        let file_info = crate::manifest_info::FileInfo {
+            world_name,
+            playtime,
+            file_size: Some(entry.size),
+        };
+
+        let folder_manifest = manifest.all_file_info.get_mut(folder_bucket);
+        if folder_manifest.is_some() {
+            folder_manifest.unwrap().files.insert(entry.manifest_key.clone(), file_info);
+        } else {
+            manifest.all_file_info.insert(folder_bucket.to_string(), UploadManifest { files: HashMap::from([(entry.manifest_key.clone(), file_info)]) });
+        }
+        
         manifest_dirty = true;
+
+        uploaded_bytes += entry.size;
+        if let Some(tx) = &progress_tx {
+            let _ = tx.send(UploadProgress {
+                uploaded_bytes,
+                total_bytes,
+                current_file: entry.manifest_key.clone(),
+                elapsed_secs: start_time.elapsed().as_secs_f32(),
+            });
+        }
     }
 
     if manifest_dirty {
-        save_manifest(&manifest_path, &manifest)?;
+        save_manifest(&manifest_path, &mut manifest.all_file_info.get_mut(folder_bucket).unwrap(), folder_bucket.to_string())?;
     }
 
     Ok(())
@@ -169,37 +271,7 @@ async fn build_b2_client() -> Result<aws_config::SdkConfig, Error> {
     Ok(shared_config)
 }
 
-fn resolve_save_dir() -> Result<PathBuf, Error> {
-    if let Ok(overridden) = env::var("VS_SAVE_DIR") {
-        return Ok(PathBuf::from(overridden));
-    }
 
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = env::var("APPDATA").map_err(to_io_error)?;
-        return Ok(Path::new(&appdata)
-            .join("VintagestoryData")
-            .join("Saves"));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = env::var("HOME").map_err(to_io_error)?;
-        return Ok(Path::new(&home)
-            .join("Library")
-            .join("Application Support")
-            .join("VintagestoryData")
-            .join("Saves"));
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        Err(Error::new(
-            ErrorKind::Unsupported,
-            "automatic save directory detection not implemented for this OS; set VS_SAVE_DIR",
-        ))
-    }
-}
 
 fn gather_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
     let mut files = Vec::new();
@@ -224,29 +296,8 @@ fn to_io_error<E: std::fmt::Display>(err: E) -> Error {
     Error::new(ErrorKind::Other, err.to_string())
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct UploadManifest {
-    files: HashMap<String, u64>,
-}
 
-fn manifest_file_path(root: &Path) -> PathBuf {
-    root.join(".cloud_save_manifest.json")
-}
 
-fn load_manifest(path: &Path) -> Result<UploadManifest, Error> {
-    if !path.exists() {
-        return Ok(UploadManifest::default());
-    }
-
-    let data = fs::read_to_string(path).map_err(to_io_error)?;
-    let manifest = serde_json::from_str(&data).unwrap_or_default();
-    Ok(manifest)
-}
-
-fn save_manifest(path: &Path, manifest: &UploadManifest) -> Result<(), Error> {
-    let data = serde_json::to_string_pretty(manifest).map_err(to_io_error)?;
-    fs::write(path, data).map_err(to_io_error)
-}
 
 fn file_key(root: &Path, file: &Path) -> String {
     file.strip_prefix(root)
