@@ -13,7 +13,8 @@ use crate::manifest_info::UploadManifest;
 use tokio::runtime::Runtime;
 
 use crate::helper_functions::resolve_save_dir;
-use crate::manifest_info::{load_manifest, manifest_file_path, save_manifest};
+use crate::manifest_info::{get_manifest_info, update_vintage_program_data};
+
 
 #[derive(Debug, Clone)]
 pub struct UploadProgress {
@@ -36,8 +37,7 @@ fn check_if_upload_is_needed(files: &[PathBuf], folder_bucket: String) -> Result
     }
 
     let save_root = resolve_save_dir()?;
-    let manifest_path = manifest_file_path(&save_root);
-    let manifest = load_manifest(&manifest_path)?;
+    let manifest = get_manifest_info()?;
 
     for file in files {
         let metadata = fs::metadata(file).map_err(to_io_error)?;
@@ -95,13 +95,7 @@ async fn run_upload(
         return Ok(());
     }
 
-    let manifest_path = manifest_file_path(&save_root);
-    if manifest_path.exists() {
-        println!("Existing manifest found. Current progress gathered.");
-    } else {
-        println!("No manifest found. Starting fresh upload progress tracking.");
-    }
-    let mut manifest = load_manifest(&manifest_path)?;
+    let mut manifest = get_manifest_info()?;
     let mut manifest_dirty = false;
 
     struct PendingUpload {
@@ -186,40 +180,6 @@ async fn run_upload(
                 )
             })?;
 
-        let world_name = if entry.manifest_key.ends_with(".vcdbs") {
-            entry
-                .manifest_key
-                .strip_suffix(".vcdbs")
-                .unwrap_or(&entry.manifest_key)
-                .to_string()
-        } else {
-            entry.manifest_key.clone()
-        };
-
-        let mut playtime = 0u64;
-        if let Ok(game_data) = crate::manifest_info::get_game_data(&entry.path) {
-            if let Some(duration_str) = game_data.get("play_duration_seconds") {
-                if let Ok(duration) = duration_str.parse::<u64>() {
-                    playtime = duration;
-                }
-            }
-        }
-
-        let file_info = crate::manifest_info::FileInfo {
-            world_name,
-            playtime,
-            file_size: Some(entry.size),
-        };
-
-        let folder_manifest = manifest.all_file_info.get_mut(folder_bucket);
-        if folder_manifest.is_some() {
-            folder_manifest.unwrap().files.insert(entry.manifest_key.clone(), file_info);
-        } else {
-            manifest.all_file_info.insert(folder_bucket.to_string(), UploadManifest { files: HashMap::from([(entry.manifest_key.clone(), file_info)]) });
-        }
-        
-        manifest_dirty = true;
-
         uploaded_bytes += entry.size;
         if let Some(tx) = &progress_tx {
             let _ = tx.send(UploadProgress {
@@ -231,10 +191,7 @@ async fn run_upload(
         }
     }
 
-    if manifest_dirty {
-        save_manifest(&manifest_path, &mut manifest.all_file_info.get_mut(folder_bucket).unwrap(), folder_bucket.to_string())?;
-    }
-
+    update_vintage_program_data(folder_bucket.to_string())?;
     Ok(())
 }
 
@@ -369,7 +326,7 @@ async fn run_download(folder_bucket: &str) -> Result<(), Error> {
                 )
             })?;
         
-        let mut body = response.body.collect().await.map_err(|err| {
+        let body = response.body.collect().await.map_err(|err| {
             Error::new(ErrorKind::Other, format!("failed to read download body: {}", err))
         })?;
         

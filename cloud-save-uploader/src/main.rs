@@ -1,8 +1,8 @@
 mod upload_core;
 mod helper_functions;
 mod manifest_info;
-
 use crate::manifest_info::{get_manifest_info, manifest_status_message};
+
 use crate::upload_core::{download_save, upload_save, UploadProgress};
 use dotenvy::dotenv;
 use eframe::{egui, App, CreationContext};
@@ -45,7 +45,7 @@ impl CloudApp {
     fn new(_: &CreationContext<'_>) -> Self {
         let (upload_sender, upload_receiver) = mpsc::channel();
         let (download_sender, download_receiver) = mpsc::channel();
-        let initial_status = manifest_status_message();
+        let initial_status = manifest_status_message().unwrap();
         let manifest = get_manifest_info().unwrap();
         let folder_bucket = manifest.current_used_bucket;
 
