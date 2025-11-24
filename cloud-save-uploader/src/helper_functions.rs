@@ -13,7 +13,14 @@ pub fn resolve_save_dir() -> Result<PathBuf, Error> {
 
     #[cfg(target_os = "windows")]
     {
+        use std::fs;
         let appdata = env::var("APPDATA").map_err(to_io_error)?;
+
+        // create the VintagestoryData folder if it doesn't exist
+        if !Path::new(&appdata).join("VintagestoryData").exists() || !Path::new(&appdata).join("VintagestoryData").join("Saves").exists() {
+            fs::create_dir_all(Path::new(&appdata).join("VintagestoryData").join("Saves")).map_err(to_io_error)?;
+        }        
+
         return Ok(Path::new(&appdata)
             .join("VintagestoryData")
             .join("Saves"));
