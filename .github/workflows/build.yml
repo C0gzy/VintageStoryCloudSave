@@ -87,3 +87,111 @@ jobs:
           name: cloud-save-uploader-windows
           path: cloud-save-uploader/target/release/cloud-save-uploader.exe
           retention-days: 7
+
+  build-tauri-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            vintage_cloud_uploader/node_modules/
+            vintage_cloud_uploader/src-tauri/target/
+          key: ${{ runner.os }}-tauri-${{ hashFiles('vintage_cloud_uploader/bun.lock', 'vintage_cloud_uploader/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-
+      
+      - name: Install frontend dependencies
+        working-directory: vintage_cloud_uploader
+        run: bun install --frozen-lockfile
+      
+      - name: Build frontend
+        working-directory: vintage_cloud_uploader
+        run: bun run build
+      
+      - name: Build Tauri app (macOS)
+        working-directory: vintage_cloud_uploader
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+          B2_REGION: ${{ secrets.B2_REGION }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+        run: bun run tauri build
+      
+      - name: Upload macOS Tauri artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vintage-cloud-uploader-macos
+          path: vintage_cloud_uploader/src-tauri/target/release/bundle/**
+          retention-days: 7
+
+  build-tauri-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\Users\runneradmin\.cargo\bin\
+            C:\Users\runneradmin\.cargo\registry\index\
+            C:\Users\runneradmin\.cargo\registry\cache\
+            C:\Users\runneradmin\.cargo\git\db\
+            vintage_cloud_uploader\node_modules\
+            vintage_cloud_uploader\src-tauri\target\
+          key: ${{ runner.os }}-tauri-${{ hashFiles('vintage_cloud_uploader/bun.lock', 'vintage_cloud_uploader/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-
+      
+      - name: Install frontend dependencies
+        working-directory: vintage_cloud_uploader
+        run: bun install --frozen-lockfile
+      
+      - name: Build frontend
+        working-directory: vintage_cloud_uploader
+        run: bun run build
+      
+      - name: Build Tauri app (Windows)
+        working-directory: vintage_cloud_uploader
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+          B2_REGION: ${{ secrets.B2_REGION }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+        run: bun run tauri build
+      
+      - name: Upload Windows Tauri artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vintage-cloud-uploader-windows
+          path: vintage_cloud_uploader/src-tauri/target/release/bundle/**
+          retention-days: 7

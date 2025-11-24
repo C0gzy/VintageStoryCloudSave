@@ -1,0 +1,13 @@
+# Environment variables
+.env
+
+# Rust build artifacts
+target/
+Cargo.lock
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

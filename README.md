@@ -1,10 +1,17 @@
 # VintageStoryCloudSave
-### Version 0.0.1 Beta
+### Version 0.0.18 Beta
 
 Very Early Version of a basic upload download system for Vintage Story to keep your saves in the cloud
 
 You are free to fork and continue work!
-Made in Rust using Egui
+Made in Rust using Tauri
+
+Refactored from Egui to Tauri to provide better UI
+
+## Images
+![UI based in tauri](Images/normal.png)
+
+![UI Uploading](Images/upload.png)
 
 ## Dependencies
 - eframe = "0.33.2"
@@ -16,7 +23,24 @@ Made in Rust using Egui
 - serde_json = "1.0"
 - dotenvy = "0.15"
 
-## How to Build
+## How to Build Tauri
+
+Create your own `.env` in `/vintage_cloud_uploader/src-tauri` and put in these values from Backblaze B2:
+```
+B2_KEY_ID=
+B2_APPLICATION_KEY=
+B2_BUCKET=
+B2_REGION=
+B2_ENDPOINT=
+```
+
+Then build:
+```
+bun i
+bun run tauri build
+```
+
+## How to Build Pure Egui version
 
 ### Option 1: Using .env file (Recommended for Development)
 
@@ -37,16 +61,19 @@ cargo build --release
 
 ### Option 2: Embedding Secrets in Binary (For Distribution)
 
-See [EMBEDDING_SECRETS.md](EMBEDDING_SECRETS.md) for instructions on embedding environment variables at compile time using GitHub Secrets.
-
 **Note:** Embedding secrets in binaries is not recommended for security reasons. Use `.env` files for development.
 
 ## To-Do
-- [ ] update UI
-- [ ] Drop Down for Cloud Save selection
+- [X] update UI
+- [X] update UX
+- [X] Drop Down for Cloud Save selection
 - [ ] Select specific files to upload and download
 - [ ] Add profiles upload
 - [ ] Add mod upload
-- [ ] Upadte progess bar as it goes
-
-
+- [ ] Update progess bar as it goes
+- [ ] Add login / Create account to handle token access and specific folder
+- [ ] add sha256 verfication to files
+- [ ] add statitics
+- [ ] Read Game Data
+- [ ] **Important** Set active dir for each bucket folder
+- [X] Swap UI frontend to Tauri
